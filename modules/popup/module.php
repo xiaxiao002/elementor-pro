@@ -1,11 +1,18 @@
 <?php
 namespace ElementorPro\Modules\Popup;
 
+use Elementor\Core\Admin\Menu\Admin_Menu_Manager;
+use Elementor\Core\Admin\Menu\Main as MainMenu;
+use Elementor\Core\Base\Document as DocumentBase;
 use Elementor\Core\Common\Modules\Ajax\Module as Ajax;
 use Elementor\Core\Documents_Manager;
 use Elementor\Core\DynamicTags\Manager as DynamicTagsManager;
 use Elementor\TemplateLibrary\Source_Local;
 use ElementorPro\Base\Module_Base;
+use ElementorPro\Core\Behaviors\Feature_Lock;
+use ElementorPro\License\API;
+use ElementorPro\Modules\Popup\AdminMenuItems\Popups_Menu_Item;
+use ElementorPro\Modules\Popup\AdminMenuItems\Popups_Promotion_Menu_Item;
 use ElementorPro\Modules\ThemeBuilder\Classes\Locations_Manager;
 use ElementorPro\Plugin;
 
@@ -16,19 +23,39 @@ if ( ! defined( 'ABSPATH' ) ) {
 class Module extends Module_Base {
 	const DOCUMENT_TYPE = 'popup';
 
+	const PROMOTION_MENU_SLUG = 'e-popups';
+
 	public function __construct() {
 		parent::__construct();
 
+		// TODO: Maybe just ignore all of those when the user can't use popups?
 		add_action( 'elementor/documents/register', [ $this, 'register_documents' ] );
 		add_action( 'elementor/theme/register_locations', [ $this, 'register_location' ] );
-		add_action( 'elementor/dynamic_tags/register_tags', [ $this, 'register_tag' ] );
+		add_action( 'elementor/dynamic_tags/register', [ $this, 'register_tag' ] );
 		add_action( 'elementor/ajax/register_actions', [ $this, 'register_ajax_actions' ] );
 
-		add_action( 'admin_menu', [ $this, 'admin_menu' ] );
 		add_action( 'wp_footer', [ $this, 'print_popups' ] );
 		add_action( 'elementor_pro/init', [ $this, 'add_form_action' ] );
 
-		add_filter( 'elementor_pro/editor/localize_settings', [ $this, 'localize_settings' ] );
+		if ( Plugin::elementor()->experiments->is_feature_active( 'admin_menu_rearrangement' ) ) {
+			add_action( 'elementor/admin/menu_registered/elementor', function( MainMenu $menu ) {
+				$this->register_admin_menu( $menu );
+			} );
+		} else {
+			add_action( 'elementor/admin/menu/register', function( Admin_Menu_Manager $admin_menu_manager ) {
+				if ( $this->can_use_popups() ) {
+					$admin_menu_manager->register( $this->get_admin_url( true ), new Popups_Menu_Item() );
+				} else {
+					$admin_menu_manager->register( static::PROMOTION_MENU_SLUG, new Popups_Promotion_Menu_Item() );
+				}
+			} );
+
+			// TODO: BC - Remove in the future.
+			add_action( 'admin_menu', function() {
+				$this->register_admin_menu_legacy();
+			}, 21 /* After `Admin_Menu_Manager` */ );
+		}
+
 		add_filter( 'elementor/finder/categories', [ $this, 'add_finder_items' ] );
 	}
 
@@ -68,27 +95,22 @@ class Module extends Module_Base {
 	}
 
 	public function register_tag( DynamicTagsManager $dynamic_tags ) {
-		$dynamic_tags->register_tag( __NAMESPACE__ . '\Tag' );
+		$tag = __NAMESPACE__ . '\Tag';
+
+		$dynamic_tags->register( new $tag() );
 	}
 
 	public function register_ajax_actions( Ajax $ajax ) {
 		$ajax->register_ajax_action( 'pro_popup_save_display_settings', [ $this, 'save_display_settings' ] );
 	}
 
-	public function localize_settings( array $settings ) {
-		$settings = array_replace_recursive( $settings, [
-			'i18n' => [
-				'popups' => esc_html__( 'Popups', 'elementor-pro' ),
-				'triggers' => esc_html__( 'Triggers', 'elementor-pro' ),
-				'timing' => esc_html__( 'Advanced Rules', 'elementor-pro' ),
-				'popup_publish_screen_triggers_description' => esc_html__( 'What action the user needs to do for the popup to open.', 'elementor-pro' ),
-				'popup_publish_screen_timing_description' => esc_html__( 'Requirements that have to be met for the popup to open.', 'elementor-pro' ),
-				'popup_settings_introduction_title' => esc_html__( 'Please Note', 'elementor-pro' ),
-				'popup_settings_introduction_message' => esc_html__( 'Popup settings are accessed via the settings icon in the bottom menu', 'elementor-pro' ),
-			],
-		] );
+	/**
+	 * @deprecated 3.1.0
+	 */
+	public function localize_settings() {
+		Plugin::elementor()->modules_manager->get_modules( 'dev-tools' )->deprecation->deprecated_function( __METHOD__, '3.1.0' );
 
-		return $settings;
+		return [];
 	}
 
 	public function save_display_settings( $data ) {
@@ -101,13 +123,37 @@ class Module extends Module_Base {
 	/**
 	 * Add New item to admin menu.
 	 *
+	 * @since 3.6.0
+	 * @access private
+	 */
+	private function register_admin_menu( MainMenu $menu ) {
+		$menu->add_submenu( [
+			'menu_title' => esc_html__( 'Popups', 'elementor-pro' ),
+			'menu_slug' => $this->get_admin_url( true ),
+			'index' => 10,
+		] );
+	}
+
+	/**
+	 * Add New item to admin menu.
+	 *
 	 * Fired by `admin_menu` action.
 	 *
-	 * @since 2.4.0
-	 * @access public
+	 * @since 3.6.0
+	 * @access private
 	 */
-	public function admin_menu() {
-		add_submenu_page( Source_Local::ADMIN_MENU_SLUG, '', esc_html__( 'Popups', 'elementor-pro' ), 'publish_posts', $this->get_admin_url( true ) );
+	private function register_admin_menu_legacy() {
+		if ( did_action( 'elementor/admin/menu/register' ) ) {
+			return;
+		}
+
+		add_submenu_page(
+			Source_Local::ADMIN_MENU_SLUG,
+			'',
+			esc_html__( 'Popups', 'elementor-pro' ),
+			'publish_posts',
+			$this->get_admin_url( true )
+		);
 	}
 
 	public function add_finder_items( array $categories ) {
@@ -118,15 +164,13 @@ class Module extends Module_Base {
 			'keywords' => [ 'template', 'popup', 'library' ],
 		];
 
-		$categories['create']['items']['popups'] = [
-			'title' => esc_html__( 'Add New Popup', 'elementor-pro' ),
-			'icon' => 'plus-circle-o',
-			'url' => $this->get_admin_url() . '#add_new',
-			'keywords' => [ 'template', 'theme', 'popup', 'new', 'create' ],
-		];
+		if ( ! $this->can_use_popups() ) {
+			$lock = new Feature_Lock( [ 'type' => 'popup' ] );
+
+			$categories['general']['items']['popups']['lock'] = $lock->get_config();
+		}
 
 		return $categories;
-
 	}
 
 	private function get_admin_url( $relative = false ) {
@@ -142,5 +186,26 @@ class Module extends Module_Base {
 			],
 			$base_url
 		);
+	}
+
+	private function can_use_popups() {
+		return ( API::is_license_active() || $this->has_popups() );
+	}
+
+	private function has_popups() {
+		$existing_popups = get_posts( [
+			'post_type' => Source_Local::CPT,
+			'posts_per_page' => 1, // Avoid fetching too much data
+			'post_status' => 'any',
+			'meta_query' => [
+				[
+					'key' => DocumentBase::TYPE_META_KEY,
+					'value' => Document::get_type(),
+				],
+			],
+			'meta_key' => DocumentBase::TYPE_META_KEY,
+		] );
+
+		return ! empty( $existing_popups );
 	}
 }
